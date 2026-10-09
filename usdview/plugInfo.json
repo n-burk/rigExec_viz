@@ -1,0 +1,1 @@
+{"Plugins":[{"Info":{"Types":{"rigexec_viz.plugin.LiveVizContainer":{"bases":["pxr.Usdviewq.plugin.PluginContainer"],"displayName":"RigExec Live Graph and Threads"}}},"LibraryPath":"","Name":"rigexec_viz.plugin","ResourcePath":".","Root":".","Type":"python"}]}
