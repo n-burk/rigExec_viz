@@ -37,21 +37,41 @@ all 85,045 operations in the biped. **Frame all operations** shows the complete
 scene. Zoom and pan to explore, or search by step number to frame a node without
 removing the rest of the graph. Search lists the first 100 matching operations.
 No graph USD file is created.
+Vertex-chunk operations (`RevisionChunk`) and their compiled incoming and outgoing
+dependencies are part of this full graph. **Vertex chunks** lists them and frames
+the first one; selecting another result frames that chunk without hiding the
+surrounding graph. Searching `vertex chunks` does the same lookup.
 
 **Operation cost heatmap** colors timed nodes blue through red by operation-body
 duration in the latest observed evaluation. The logarithmic scale runs from
 zero to that evaluation's maximum, shown in microseconds beside the legend.
 Untimed nodes keep their normal colors; a measured zero is blue. The colors
-persist between evaluations, while amber execution outlines still fade. Toggle
+also cover dependency noodles: each uses its source operation's body cost,
+updated only when both endpoints have timing samples in the same observed generation.
+Each noodle retains that color through later empty or partial runs until a new
+eligible measurement replaces it. Clear capture or graph replacement resets it.
+Noodles do not have a separately measured duration. Heat colors persist between
+evaluations, while amber execution outlines still fade. Toggle
 **Execution flashes** off to inspect heat colors without the amber overlay.
 **Show heaviest** lists the 100 longest operations; click one to frame it and
-inspect its measured duration. **Follow live** pauses heatmap updates as well as
+inspect its measured duration. Details identify the heat sample's generation
+and frame separately from whether the operation ran in the latest followed
+capture. Empty observations retain the earlier heat sample and its identity.
+Body durations are elapsed intervals and can include thread preemption; they
+are not CPU-time measurements or time spent waiting for dependencies.
+**Follow live** pauses heatmap updates as well as
 the trace display. Timing must be enabled to collect new samples. Heatmap costs
 exclude dependency wait time and are not inclusive subtree or critical-path
 costs. Clear capture or graph replacement clears the heatmap.
 Heatmap geometry is cached in chunks; camera movement reuses it and local node
-moves only invalidate affected chunks. It reads the existing timing snapshots
+moves only invalidate affected node and incident-noodle chunks. Heat and glow
+layers are cached as screen images between changes; fades composite the cached
+glow instead of redrawing every operation and noodle. It reads the existing timing snapshots
 without adding evaluator work, locks, or another evaluation loop.
+Sparse execution updates visit outgoing dependencies of executed operations
+instead of scanning every visible noodle. Cached overlay curves use adaptive
+sampling within half a screen pixel, including backward bends; pan reuses them
+and crossing a zoom detail level refreshes their geometry.
 
 Pan/zoom reuses cached graph bounds and GPU geometry. At overview scales,
 unreadable labels are omitted; every node and dependency remains rendered.
@@ -104,6 +124,9 @@ evaluation is always retained). The UI reports evictions. Polling may skip
 intermediate evaluations. Cache hits produce no operation execution, and detached
 frame-cache warming is excluded. Captured evaluator time and viewport time are
 shown separately because they can differ. Graph replacement invalidates history.
+Inspection and cached fade repaints continue every 100 ms while manipulating
+controls, so completed observed runs flash before mouse release. Polling can
+skip intermediate runs; the panel does not replay or infer those executions.
 Uncheck **Follow live** to hold the displayed trace; use **Export Chrome trace**
 for Chrome trace-event JSON. The host owns all evaluation and scheduling.
 

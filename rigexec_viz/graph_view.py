@@ -2,7 +2,7 @@
 from UsdNoodles.graphView import GraphView, _push_undo_command
 from UsdNoodles.core import positionWriteGeneration, GraphModel
 from UsdNoodles.widgets.minimap import Minimap
-from pxr.Usdviewq.qt import QtCore
+from pxr.Usdviewq.qt import QtCore, QGLFormat
 from pxr import Gf
 
 
@@ -27,7 +27,14 @@ class LiveGraphView(GraphView):
     inspectionNodesMoved = QtCore.Signal(object)
     _LINK_CHUNK = 512
     def __init__(self, parent=None):
-        super().__init__(parent=parent)
+        # UsdNoodles selects GL 3.2 for its own canvas, but also changes Qt's
+        # process-wide default. Auto-open can run before usdview creates its
+        # viewport: keep that viewport's higher-capability format intact.
+        host_format = QGLFormat.defaultFormat()
+        try:
+            super().__init__(parent=parent)
+        finally:
+            QGLFormat.setDefaultFormat(host_format)
         self.minimap = CachedMinimap(self)
         self._link_chunks = []
         self._incident_links = {}

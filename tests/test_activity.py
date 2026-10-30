@@ -44,7 +44,10 @@ class ActivityTest(unittest.TestCase):
     def test_clear(self):
         model = ActivityModel()
         model.fire(["a"], 0.0)
+        self.assertTrue(model.has_live(0.0))
+        self.assertFalse(model.has_live(10.0))
         model.clear()
+        self.assertFalse(model.has_live(0.0))
         self.assertEqual(model.live(0.0), {})
 
 

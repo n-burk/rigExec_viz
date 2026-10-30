@@ -1,13 +1,14 @@
 """Graph/trace UI against usdview's real imaging evaluator.
 
-Run with testusdview and RIGEXEC_VIZ_ROOT on PYTHONPATH. No private evaluator.
+Run with testusdview on an animated stage (for example ArmShotAnim.usda)
+and RIGEXEC_VIZ_ROOT on PYTHONPATH. No private evaluator.
 """
 import os
 
 
 def testUsdviewInputFunction(appController):
     from pxr import Usd
-    from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
+    from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets, QGLFormat
     from unittest.mock import patch
     from rigexec_viz.session import LiveSession, trace_stats
     from rigexec_viz.window import RigVizWindow
@@ -16,7 +17,9 @@ def testUsdviewInputFunction(appController):
     api = appController._usdviewApi
     source = api.stage.GetRootLayer().ExportToString()
     session = LiveSession(api)
+    host_format = QGLFormat.defaultFormat()
     window = RigVizWindow(session, api.qMainWindow)
+    assert QGLFormat.defaultFormat() == host_format, 'Graph changed the host OpenGL default'
     window.show()
     QtWidgets.QApplication.processEvents()
     window.poll()
@@ -25,14 +28,27 @@ def testUsdviewInputFunction(appController):
     print('FULL_GRAPH_LOAD_SECONDS', time.monotonic()-started, flush=True)
     first = session.generation
     window.tabs.setCurrentIndex(1)
-    api.dataModel.currentFrame = Usd.TimeCode(api.stage.GetStartTimeCode()+12)
-    window.poll()
+    # Range warming caches integer frames without producing live traces.
+    # Scrub between them so this test observes real host operation runs.
+    api.dataModel.currentFrame = Usd.TimeCode(api.stage.GetStartTimeCode()+12.25)
+    appController._stageView.updateGL()
+    QtWidgets.QApplication.processEvents()
+    with patch.object(QtWidgets.QApplication, 'mouseButtons', return_value=QtCore.Qt.MouseButton.LeftButton):
+        window.poll()
+        assert session.generation != first, 'Live capture waited for mouse release'
+        assert window.overlay.model._last_fire, 'No highlights during manipulation'
+        with patch.object(window.overlay, 'isVisible', return_value=True), \
+             patch.object(window.overlay, 'update') as repaint:
+            window.overlay._on_tick()
+            repaint.assert_called_once()
     assert session.generation != first
     assert session.history
     assert window.timeline.events, window.status.text()
     assert trace_stats(session.history[-1]['trace'])['threads'] >= 1
-    for offset in (13, 14):
+    for offset in (13.25, 14.25):
         api.dataModel.currentFrame = Usd.TimeCode(api.stage.GetStartTimeCode()+offset)
+        appController._stageView.updateGL()
+        QtWidgets.QApplication.processEvents()
         window.poll()
     assert len(window.timeline.frame_intervals) >= 3
     from rigexec_viz.heatmap import operation_costs
@@ -48,6 +64,22 @@ def testUsdviewInputFunction(appController):
         QtWidgets.QApplication.processEvents()
         window.grab().save(os.environ['RIGEXEC_VIZ_CAPTURE']+'.timeline.png')
     assert len(window.view.nodeGraph.nodes) == len(session.graph)
+    chunk_steps = [step for step, op in session.graph.items() if op['kind'] == 'RevisionChunk']
+    assert chunk_steps, 'Use a stage with vertex-chunk operations'
+    window.tabs.setCurrentIndex(0)
+    QtWidgets.QApplication.processEvents()
+    window.view.paintGL()
+    edges = {(str(link.sourceNodeId), str(link.targetNodeId)) for link in window.view.links}
+    for step in chunk_steps:
+        assert 'step:%d' % step in window.view.nodes
+        for pred in session.graph[step]['preds']:
+            assert ('step:%d' % pred, 'step:%d' % step) in edges
+        for succ in session.graph[step]['succs']:
+            assert ('step:%d' % step, 'step:%d' % succ) in edges
+    window.show_vertex_chunks()
+    assert window.results.count() == min(100, len(chunk_steps))
+    assert len(window.view.nodeGraph.nodes) == len(session.graph)
+    print('VERTEX_CHUNKS_OK', len(chunk_steps), flush=True)
     window.view.minimap.getGraphBounds()
     bounds_rebuilds = window.view.minimap.bounds_rebuilds
     for _ in range(5):
@@ -88,6 +120,7 @@ def testUsdviewInputFunction(appController):
         window.overlay.fire(fired)
         window.overlay.repaint()
         assert window.overlay._heat_paths
+        assert any(window.overlay._heat_link_paths.values())
         heat_rebuilds = window.overlay.heat_rebuilds
         window.view.panX += 2
         window.overlay.repaint()
@@ -101,6 +134,12 @@ def testUsdviewInputFunction(appController):
         window.overlay.repaint()
         assert window.overlay.painted_nodes > 0
         assert window.overlay.painted_links > 0
+        assert window.overlay.painted_heat_links > 0
+        # A fade repaint must reuse rasterized layers, without rescanning the
+        # graph or drawing thousands of paths on the host event thread.
+        with patch.object(window.overlay, '_build_glow', side_effect=AssertionError('uncached fade')), \
+             patch.object(window.overlay, '_paint_heat_geometry', side_effect=AssertionError('uncached heat')):
+            window.overlay.repaint()
         window.grab().save(os.environ['RIGEXEC_VIZ_CAPTURE']+'.all.png')
         window.flashes.setChecked(False)
         window.focus(int(heaviest.split(':')[-1]))
@@ -146,7 +185,10 @@ def testUsdviewInputFunction(appController):
             QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.NoButton))
         view.paintGL()
     assert tuple(node.position) != before
-    assert window.overlay._heat_dirty == {window.overlay._heat_chunk_of[node.id]}
+    affected = {node.id} | {str(view.links[i].sourceNodeId)
+                            for i in view._incident_links.get(node.id, ())}
+    assert window.overlay._heat_dirty == {window.overlay._heat_chunk_of[i]
+                                          for i in affected if i in window.overlay._heat_chunk_of}
     window.overlay.repaint()
     assert not window.overlay._heat_dirty
     assert not view.draggingNodes and not node._dragging
@@ -171,8 +213,32 @@ def testUsdviewInputFunction(appController):
     window.heat.setChecked(False)
     assert not window.overlay.heat_enabled
     window.heat.setChecked(True)
+    # Later empty or partial observations preserve the last eligible noodle
+    # colors; endpoints from different observations must not recolor an edge.
+    saved_links = {source: dict(targets) for source, targets in window.overlay._heat_link_buckets.items()}
+    assert saved_links
+    heat_generation, heat_time = window.heat_generation, window.heat_time
+    cost_step = int(next(iter(window.overlay.costs)).split(':')[-1])
+    window.update_heat([], 'empty-observation', 999)
+    assert (window.heat_generation, window.heat_time) == (heat_generation, heat_time)
+    window.show_details(cost_step)
+    assert 'heat sample G%s, frame %s' % (heat_generation, heat_time) in window.details.toPlainText()
+    assert window.overlay._heat_link_buckets == saved_links
+    source_id, targets = next(iter(saved_links.items()))
+    target_id = next(iter(targets))
+    window.overlay.set_heat([[int(target_id.split(':')[-1]), 1, 9999, 'test', 1]])
+    assert window.overlay._heat_link_buckets == saved_links
+    window.overlay.repaint()
+    heat_image = QtGui.QImage(window.overlay.size(), QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+    heat_image.fill(QtCore.Qt.GlobalColor.transparent)
+    heat_painter = QtGui.QPainter(heat_image)
+    window.overlay._paint_heat(heat_painter)
+    heat_painter.end()
+    assert any(window.overlay._heat_link_paths.values())
     window.update_heat([])
+    assert not window.overlay._heat_link_buckets
     assert not window.overlay.costs and not window.overlay._heat_paths
+    assert not window.overlay._heat_link_paths and window.overlay._heat_image is None
     window.close()
     assert not session.transport.snapshot(session.stage_id, session.rig, '', '')['recording']
     print('LIVE_VIZ_UI_OK', len(session.graph), trace_stats(session.history[-1]['trace']))

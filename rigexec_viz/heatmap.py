@@ -22,3 +22,13 @@ def color_bucket(duration, maximum):
         return 0
     return min(len(COLORS)-1, max(0, int(
         math.log1p(duration)/math.log1p(maximum)*(len(COLORS)-1))))
+
+
+def dependency_bucket(source, target, costs, maximum):
+    """Source body cost, only when both ends were timed in this snapshot.
+
+    Dependencies have no measured duration of their own.
+    """
+    if source not in costs or target not in costs:
+        return None
+    return color_bucket(costs[source], maximum)

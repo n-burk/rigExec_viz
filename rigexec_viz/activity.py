@@ -17,6 +17,7 @@ class ActivityModel:
         self.tau = float(tau)
         self.floor = float(floor)
         self._last_fire = {}
+        self._latest_fire = None
 
     @property
     def fade_seconds(self):
@@ -27,6 +28,11 @@ class ActivityModel:
         """Light ``keys`` at their brightest at time ``now``."""
         for key in keys:
             self._last_fire[key] = now
+            self._latest_fire = now
+
+    def has_live(self, now):
+        """Constant-time fade timer check; painting prunes expired entries."""
+        return self._latest_fire is not None and now-self._latest_fire < self.fade_seconds
 
     def value(self, key, now):
         """Current brightness of ``key`` in [0, 1]."""
@@ -48,3 +54,4 @@ class ActivityModel:
 
     def clear(self):
         self._last_fire.clear()
+        self._latest_fire = None

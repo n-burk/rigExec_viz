@@ -160,6 +160,7 @@ class RigVizWindow(QtWidgets.QMainWindow):
         self.overlay.raise_()
         heat_controls = QtWidgets.QHBoxLayout()
         self.heat = QtWidgets.QCheckBox('Operation cost heatmap'); self.heat.setChecked(True)
+        self.heat.setToolTip('Nodes show measured body time. Noodles use the source cost when both endpoints were timed in the same generation.')
         self.heat.toggled.connect(self.toggle_heat)
         heat_controls.addWidget(self.heat)
         self.flashes = QtWidgets.QCheckBox('Execution flashes'); self.flashes.setChecked(True)
@@ -174,7 +175,12 @@ class RigVizWindow(QtWidgets.QMainWindow):
         gl.insertLayout(1, heat_controls)
         frame = QtWidgets.QPushButton('Frame all operations')
         frame.clicked.connect(self.frame_all)
-        gl.insertWidget(1, frame)
+        graph_actions = QtWidgets.QHBoxLayout()
+        graph_actions.addWidget(frame)
+        chunks = QtWidgets.QPushButton('Vertex chunks')
+        chunks.clicked.connect(self.show_vertex_chunks)
+        graph_actions.addWidget(chunks)
+        gl.insertLayout(1, graph_actions)
         self.details = QtWidgets.QPlainTextEdit(); self.details.setReadOnly(True); split.addWidget(self.details)
         split.setSizes([260, 850, 290])
         self.tabs.addTab(graph_tab, 'In-memory operation graph')
@@ -194,6 +200,10 @@ class RigVizWindow(QtWidgets.QMainWindow):
         self.display_history = []
         self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self.poll); self.timer.start(100)
         self.last_selected = None
+        self.heat_generation = None
+        self.heat_time = None
+        self.observed_steps = set()
+        self.observed_generation = None
 
     def _record(self, enabled):
         self.session.recording = enabled
@@ -226,10 +236,13 @@ class RigVizWindow(QtWidgets.QMainWindow):
                 print('[rigExec_viz] attached to %s: %d live operations, Work concurrency limit %s' %
                       (self.session.rig, len(self.session.graph), reply['concurrency_limit']), flush=True)
             if 'trace' in reply and self.live.isChecked():
+                self.observed_steps = {int(e[0]) for e in reply['trace']}
+                self.observed_generation = reply['generation']
+                self.last_selected = None
                 if self.tabs.currentIndex() == 1:
                     self.refresh_history()
                 if reply.get('recording'):
-                    self.update_heat(reply['trace'], reply['generation'])
+                    self.update_heat(reply['trace'], reply['generation'], reply.get('time'))
                     self.overlay.fire('step:%d' % e[0] for e in reply['trace'])
             selected = getattr(self.view, '_selectedNodes', set())
             if len(selected) == 1:
@@ -243,12 +256,23 @@ class RigVizWindow(QtWidgets.QMainWindow):
 
     def find(self):
         query = self.search.text().lower().strip()
+        if query in ('vertex chunk', 'vertex chunks'):
+            query = 'revisionchunk'
         self.results.clear()
         for step, op in self.session.graph.items():
             if not query or query == str(step) or query in (op['label']+' '+op['kind']).lower():
                 item = QtWidgets.QListWidgetItem('s%d %s\n%s' % (step, op['kind'], op['label']))
                 item.setData(QtCore.Qt.ItemDataRole.UserRole, step); self.results.addItem(item)
                 if self.results.count() >= 100: break
+
+    def show_vertex_chunks(self):
+        self.search.setText('vertex chunks')
+        self.find()
+        chunks = [step for step, op in self.session.graph.items() if op['kind'] == 'RevisionChunk']
+        if chunks:
+            self.focus(chunks[0])
+        else:
+            self.details.setPlainText('The current host operation graph contains no vertex chunks.')
 
     def toggle_heat(self, enabled):
         self.overlay.heat_enabled = enabled
@@ -258,10 +282,15 @@ class RigVizWindow(QtWidgets.QMainWindow):
         self.overlay.activity_enabled = enabled
         self.overlay.update()
 
-    def update_heat(self, events, generation=None):
-        self.overlay.set_heat(events)
+    def update_heat(self, events, generation=None, frame_time=None):
+        replaced = self.overlay.set_heat(events, clear=generation is None)
+        if replaced:
+            self.heat_generation, self.heat_time = generation, frame_time
+        if generation is None:
+            self.observed_steps.clear()
+            self.observed_generation = None
         self.heat_metrics.setText(('G%s: %d timed nodes; max %g us' %
-            (generation, len(self.overlay.costs), self.overlay.heat_maximum))
+            (self.heat_generation, len(self.overlay.costs), self.overlay.heat_maximum))
             if self.overlay.costs else 'Waiting for timed operations')
         self.last_selected = None
 
@@ -277,8 +306,13 @@ class RigVizWindow(QtWidgets.QMainWindow):
 
     def show_details(self, step):
         cost = self.overlay.costs.get('step:%d' % step)
-        timing = ('Operation body: %g us in the displayed heatmap generation' % cost
+        timing = ('Operation body: %g us — heat sample G%s, frame %s' %
+                  (cost, self.heat_generation, self.heat_time)
                   if cost is not None else 'No timing sample in the displayed heatmap generation')
+        timing += '\n%s in latest followed generation G%s.' % (
+            'Observed running' if step in self.observed_steps else 'Not observed running',
+            self.observed_generation)
+        timing += '\nBody timings are elapsed intervals, not CPU time or dependency wait time.'
         self.details.setPlainText(timing+'\n\n'+json.dumps(self.session.graph[step], indent=2))
 
     def focus(self, step):

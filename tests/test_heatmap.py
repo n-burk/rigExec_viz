@@ -1,8 +1,17 @@
 import unittest
-from rigexec_viz.heatmap import COLORS, color_bucket, operation_costs
+from rigexec_viz.heatmap import COLORS, color_bucket, operation_costs, dependency_bucket
 
 
 class HeatmapTest(unittest.TestCase):
+    def test_dependency_uses_source_cost_only_for_same_snapshot(self):
+        costs = operation_costs([[1, 10, 100, 'a', 1], [2, 20, 0, 'b', 2]])
+        self.assertEqual(dependency_bucket('step:1', 'step:2', costs, 100), len(COLORS)-1)
+        self.assertEqual(dependency_bucket('step:2', 'step:1', costs, 100), 0)
+        self.assertIsNone(dependency_bucket('step:1', 'step:3', costs, 100))
+        # Replacing the trace must not join runs from different generations.
+        costs = operation_costs([[3, 30, 50, 'b', 1]])
+        self.assertIsNone(dependency_bucket('step:1', 'step:3', costs, 50))
+
     def test_only_measured_body_time(self):
         self.assertEqual(operation_costs([
             [1, 10, 20, 'a', 1], [1, 30, 5, 'b', 2],
