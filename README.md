@@ -32,8 +32,8 @@ menu contains **Live Graph and Threads**. Set `RIGEXEC_VIZ_AUTOOPEN=1` to open i
 on startup.
 
 The graph is read directly from the active in-memory program. Search covers all
-operations; the node canvas contains every operation and dependency, including
-all 85,045 operations in the biped. **Frame all operations** shows the complete
+operations; the node canvas contains every operation and dependency in the
+current compiled rig. **Frame all operations** shows the complete
 scene. Zoom and pan to explore, or search by step number to frame a node without
 removing the rest of the graph. Search lists the first 100 matching operations.
 No graph USD file is created.
@@ -82,7 +82,9 @@ run USD property/port authoring tests or generate adaptive curve-picking segment
 for dependency noodles. Ending a camera drag does not scan all node selections.
 Selection uses a blue overlay instead of rebuilding all node geometry. Dragging
 updates selected node transforms and incident dependency chunks; unrelated
-noodles stay cached. Local layout moves support undo and never author rig USD.
+noodles stay cached. Local layout moves support Ctrl+Z undo and Ctrl+Shift+Z or
+Ctrl+Y redo and never author rig USD. This history belongs to the inspection
+window and resets on graph replacement, independently of USD editor histories.
 Ctrl-click and box selection select multiple operation nodes.
 
 With **Follow live** enabled, executed nodes flash amber and fade over four
@@ -90,7 +92,9 @@ seconds. Dependency noodles flash when both endpoints ran in the same observed
 generation. Highlights report completed operation runs; they do not imply that
 the UI is repainting during individual microsecond-long operations. Repeated
 polls of the same generation do not retrigger highlights. Pausing Follow live
-stops new flashes. The complete scene is built once per graph replacement;
+stops new flashes. Flashes remain active with **Record operation timing** off;
+that setting controls timing samples, not execution activity.
+The complete scene is built once per graph replacement;
 initial loading is more expensive than reading subsequent execution traces.
 
 Open **Thread trace**, then manipulate controls or play/change usdview's frames.

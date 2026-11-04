@@ -26,6 +26,7 @@ def testUsdviewInputFunction(appController):
     assert session.graph, window.status.text()
     assert not window.status.text().startswith('Live bridge error'), window.status.text()
     print('FULL_GRAPH_LOAD_SECONDS', time.monotonic()-started, flush=True)
+    _check_preview_flashes(appController, window)
     first = session.generation
     window.tabs.setCurrentIndex(1)
     # Range warming caches integer frames without producing live traces.
@@ -172,16 +173,16 @@ def testUsdviewInputFunction(appController):
         return QtGui.QMouseEvent(kind, pos, pos, button, buttons, QtCore.Qt.KeyboardModifier.NoModifier)
     with patch.object(view.nodeGraph, 'syncNodesFromModels', side_effect=AssertionError('full node sync during drag')), \
          patch.object(view, '_updateLinkSelectionFromNodes', side_effect=AssertionError('full edge selection scan')):
-        view.mousePressEvent(mouse(QtCore.QEvent.Type.MouseButtonPress, point,
+        QtWidgets.QApplication.sendEvent(view, mouse(QtCore.QEvent.Type.MouseButtonPress, point,
             QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.LeftButton))
         assert node.id in view._selectedNodes
         view.paintGL()
-        view.mouseMoveEvent(mouse(QtCore.QEvent.Type.MouseMove, moved_point,
+        QtWidgets.QApplication.sendEvent(view, mouse(QtCore.QEvent.Type.MouseMove, moved_point,
             QtCore.Qt.MouseButton.NoButton, QtCore.Qt.MouseButton.LeftButton))
         expected_chunks = {i//view._LINK_CHUNK for i in view._incident_links.get(node.id, ())}
         assert view._dirty_link_chunks == expected_chunks
         view.paintGL()
-        view.mouseReleaseEvent(mouse(QtCore.QEvent.Type.MouseButtonRelease, moved_point,
+        QtWidgets.QApplication.sendEvent(view, mouse(QtCore.QEvent.Type.MouseButtonRelease, moved_point,
             QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.NoButton))
         view.paintGL()
     assert tuple(node.position) != before
@@ -193,12 +194,18 @@ def testUsdviewInputFunction(appController):
     assert not window.overlay._heat_dirty
     assert not view.draggingNodes and not node._dragging
     after_drag = tuple(node.position)
-    from UsdNoodles._usdNoodles import NoodlesUndoManager
-    undo = NoodlesUndoManager.instance()
-    assert undo.undoDescription() == 'Move operation nodes'
-    undo.undo()
+    def key(key, modifiers):
+        QtWidgets.QApplication.sendEvent(view, QtGui.QKeyEvent(
+            QtCore.QEvent.Type.KeyPress, key, modifiers))
+    assert view._undoHistory is None
+    assert len(view._layout_undo) == 1
+    key(QtCore.Qt.Key.Key_Z, QtCore.Qt.KeyboardModifier.ControlModifier)
     assert tuple(node.position) == before
-    undo.redo()
+    key(QtCore.Qt.Key.Key_Z, QtCore.Qt.KeyboardModifier.ControlModifier |
+        QtCore.Qt.KeyboardModifier.ShiftModifier)
+    assert tuple(node.position) == after_drag
+    key(QtCore.Qt.Key.Key_Z, QtCore.Qt.KeyboardModifier.ControlModifier)
+    key(QtCore.Qt.Key.Key_Y, QtCore.Qt.KeyboardModifier.ControlModifier)
     assert tuple(node.position) == after_drag
     # Box selection still selects operation nodes through the spatial index.
     view.clearSelection()
@@ -239,7 +246,81 @@ def testUsdviewInputFunction(appController):
     assert not window.overlay._heat_link_buckets
     assert not window.overlay.costs and not window.overlay._heat_paths
     assert not window.overlay._heat_link_paths and window.overlay._heat_image is None
+    from rigexec_viz.graph_view import LiveGraphView
+    other_view = LiveGraphView()
+    other_view._performUndo()
+    assert tuple(node.position) == after_drag
+    other_view.close()
+    other_view.deleteLater()
+    view.marqueeActive = True
+    with patch.object(view, '_update_inspection_marquee', side_effect=RuntimeError('inspection test')), \
+         patch('UsdNoodles.graphView.Tf.Warn') as warning:
+        QtWidgets.QApplication.sendEvent(view, mouse(QtCore.QEvent.Type.MouseButtonRelease,
+            moved_point, QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.NoButton))
+        warning.assert_called_once()
+        assert 'inspection test' in warning.call_args[0][0]
+    view.marqueeActive = False
+    window.load_graph()
+    assert not view._layout_undo and not view._layout_redo
+    replacement = view.nodes[node.id]
+    replacement_position = tuple(replacement.position)
+    key(QtCore.Qt.Key.Key_Z, QtCore.Qt.KeyboardModifier.ControlModifier)
+    key(QtCore.Qt.Key.Key_Y, QtCore.Qt.KeyboardModifier.ControlModifier)
+    assert tuple(replacement.position) == replacement_position
+    assert source == api.stage.GetRootLayer().ExportToString()
+    assert session_layer == api.stage.GetSessionLayer().ExportToString()
     window.close()
     assert not session.transport.snapshot(session.stage_id, session.rig, '', '')['recording']
     print('LIVE_VIZ_UI_OK', len(session.graph), trace_stats(session.history[-1]['trace']))
     appController._stageView.makeCurrent()
+
+
+def _check_preview_flashes(appController, window):
+    import ctypes
+    from pxr import Sdf, Usd
+    from imagingHandle import ImagingHandle
+    from pxr.Usdviewq.qt import QtCore, QtWidgets
+    from unittest.mock import patch
+
+    session = window.session
+    api = appController._usdviewApi
+    root = Sdf.Path(session.rig)
+    control = next(prim for prim in Usd.PrimRange(api.stage.GetPrimAtPath(root))
+                   if prim.GetTypeName() == 'RigExecControl' and prim.GetAttribute('avars:tx'))
+    attr = control.GetAttribute('avars:tx')
+    base = attr.Get(api.dataModel.currentFrame)
+    imaging = ImagingHandle(session.transport.lib, api.stage)
+    assert imaging.BeginPreview(str(attr.GetPath())) == 1
+    try:
+        for offset, recording, following in ((1, True, True), (2, False, True),
+                                             (3, False, False), (4, False, True)):
+            window.record.setChecked(recording)
+            window.live.setChecked(following)
+            heat = dict(window.overlay.costs)
+            heat_identity = window.heat_generation, window.heat_time
+            window.overlay.model.clear()
+            generation = session.generation
+            assert imaging.UpdatePreview((ctypes.c_double * 1)(base + offset), 1) == 0
+            appController._stageView.updateGL()
+            with patch.object(QtWidgets.QApplication, 'mouseButtons',
+                              return_value=QtCore.Qt.MouseButton.LeftButton):
+                loop = QtCore.QEventLoop()
+                QtCore.QTimer.singleShot(window.timer.interval() * 2, loop.quit)
+                loop.exec()
+            assert session.generation != generation, window.status.text()
+            trace = session.history[-1]['trace']
+            assert trace, 'Control preview produced no observed operations'
+            fired = {'step:%d' % event[0] for event in trace}
+            assert set(window.overlay.model._last_fire) == (fired if following else set()), \
+                'Execution flashes must follow observed runs independently of timing recording'
+            if not recording:
+                assert all(event[1] == 0 and not event[3] for event in trace)
+                assert window.overlay.costs == heat
+                assert (window.heat_generation, window.heat_time) == heat_identity
+            fires = dict(window.overlay.model._last_fire)
+            window.poll()
+            assert window.overlay.model._last_fire == fires, 'Repeated poll retriggered flashes'
+    finally:
+        imaging.EndPreview()
+        window.record.setChecked(True)
+    print('LIVE_PREVIEW_FLASHES_OK', flush=True)

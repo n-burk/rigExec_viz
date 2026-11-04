@@ -243,7 +243,7 @@ class RigVizWindow(QtWidgets.QMainWindow):
                     self.refresh_history()
                 if reply.get('recording'):
                     self.update_heat(reply['trace'], reply['generation'], reply.get('time'))
-                    self.overlay.fire('step:%d' % e[0] for e in reply['trace'])
+                self.overlay.fire('step:%d' % e[0] for e in reply['trace'])
             selected = getattr(self.view, '_selectedNodes', set())
             if len(selected) == 1:
                 selected_id = next(iter(selected))

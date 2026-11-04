@@ -1,5 +1,5 @@
 """Rendering policy for the complete, stageless operation graph."""
-from UsdNoodles.graphView import GraphView, _push_undo_command
+from UsdNoodles.graphView import GraphView, _guardsQtBoundary
 from UsdNoodles.core import positionWriteGeneration, GraphModel
 from UsdNoodles.widgets.minimap import Minimap
 from pxr.Usdviewq.qt import QtCore, QGLFormat
@@ -41,6 +41,28 @@ class LiveGraphView(GraphView):
         self._dirty_link_chunks = set()
         self._drag_origins = {}
         self._inspection_marquee_base = set()
+        self._layout_undo = []
+        self._layout_redo = []
+        self.nodeGraphReplaced.connect(self._clear_layout_history)
+
+    def _clear_layout_history(self):
+        self._layout_undo.clear()
+        self._layout_redo.clear()
+        self._drag_origins.clear()
+        self._inspection_marquee_base.clear()
+        self.draggingNodes = self.marqueeActive = False
+
+    def _performUndo(self):
+        if self._layout_undo:
+            initial, final = self._layout_undo[-1]
+            self._move_to_positions(initial)
+            self._layout_redo.append(self._layout_undo.pop())
+
+    def _performRedo(self):
+        if self._layout_redo:
+            initial, final = self._layout_redo[-1]
+            self._move_to_positions(final)
+            self._layout_undo.append(self._layout_redo.pop())
 
     def clearSelection(self):
         for node_id in self._selectedNodes:
@@ -51,6 +73,7 @@ class LiveGraphView(GraphView):
         self.inspectionSelectionChanged.emit()
         self.update()
 
+    @_guardsQtBoundary
     def mousePressEvent(self, event):
         if event.button() != QtCore.Qt.MouseButton.LeftButton or self.spacePressed:
             return super().mousePressEvent(event)
@@ -133,6 +156,7 @@ class LiveGraphView(GraphView):
         self.inspectionSelectionChanged.emit()
         self.update()
 
+    @_guardsQtBoundary
     def mouseMoveEvent(self, event):
         if self.marqueeActive and event.buttons() & QtCore.Qt.MouseButton.LeftButton:
             self._update_inspection_marquee(event.position().toPoint())
@@ -165,6 +189,7 @@ class LiveGraphView(GraphView):
             return
         super().mouseMoveEvent(event)
 
+    @_guardsQtBoundary
     def mouseReleaseEvent(self, event):
         if self.marqueeActive and event.button() == QtCore.Qt.MouseButton.LeftButton:
             self._update_inspection_marquee(event.position().toPoint())
@@ -181,12 +206,10 @@ class LiveGraphView(GraphView):
             initial = self._drag_origins
             self._drag_origins = {}
             if initial != final:
-                graph = self.nodeGraph
-                def restore(positions):
-                    if self.nodeGraph is graph:
-                        self._move_to_positions(positions)
-                _push_undo_command('Move operation nodes',
-                    lambda p=final: restore(p), lambda p=initial: restore(p))
+                # Layout belongs to this inspection graph, not a USD stage history.
+                self._layout_undo.append((initial, final))
+                del self._layout_undo[:-100]
+                self._layout_redo.clear()
             self.inspectionSelectionChanged.emit()
             self.update()
             event.accept()
